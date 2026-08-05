@@ -175,6 +175,8 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [txPreset, setTxPreset] = useState(null);
   const [editingTx, setEditingTx] = useState(null);
+  const [txTypeFilter, setTxTypeFilter] = useState("all");
+  const [txCategoryFilter, setTxCategoryFilter] = useState("all");
   const isMobile = useIsMobile();
   useGoogleFonts();
   const storage = useMemo(() => createDataBridge(), []);
@@ -327,6 +329,11 @@ export default function App() {
   };
 
   const openTx = (preset) => setTxPreset(preset || {});
+  const openTransactionsForCategory = (category) => {
+    setTxTypeFilter("expense");
+    setTxCategoryFilter(category);
+    setTab("transacoes");
+  };
   const openInvoicePayment = (invoice) => setTxPreset({
     type: "expense", category: invoice.label, amount: invoice.amount,
     description: "Pagamento " + invoice.label, cashflowOnly: true,
@@ -368,13 +375,13 @@ export default function App() {
       <main style={{ flex: 1, minWidth: 0, padding: isMobile ? "4px 12px 104px" : "8px 12px 18px", overflowY: "auto" }}>
         <MonthNav T={T} cursor={cursor} setCursor={setCursor} isMobile={isMobile} />
 
-        {tab === "dashboard" && <Dashboard T={T} monthTx={monthTx} transactions={data.transactions} cursor={cursor} plan={plan} variableCategories={variableCategories} saldoReal={saldoReal} isMobile={isMobile} />}
+        {tab === "dashboard" && <Dashboard T={T} monthTx={monthTx} transactions={data.transactions} cursor={cursor} plan={plan} variableCategories={variableCategories} saldoReal={saldoReal} isMobile={isMobile} onOpenCategory={openTransactionsForCategory} />}
         {tab === "planejamento" && (
           <Planejamento T={T} plan={plan} variableCategories={variableCategories} bills={applicableBills} cards={data.cards} transactions={data.transactions} mKey={mKey} projIncome={projIncome} projFixed={projFixed} saldoPlanejado={saldoPlanejado}
             saldoReal={saldoReal} onAddIncome={addIncome} onRemoveIncome={removeIncome} onAddBill={(b) => addBill({ ...b, months: [parseInt(mKey.split("-")[1], 10)] })} onDeleteBill={deleteBill}
             onSetVariablePlanned={setVariablePlanned} onSetWeight={setWeight} onRenameVariableCategory={renameVariableCategory} onRecalcular={recalcularComReal} isMobile={isMobile} />
         )}
-        {tab === "transacoes" && <Transacoes T={T} monthTx={monthTx} variableCategories={variableCategories} onOpenEdit={setEditingTx} onOpenNew={() => openTx({})} isMobile={isMobile} />}
+        {tab === "transacoes" && <Transacoes T={T} monthTx={monthTx} variableCategories={variableCategories} typeFilter={txTypeFilter} onTypeFilterChange={setTxTypeFilter} categoryFilter={txCategoryFilter} onCategoryFilterChange={setTxCategoryFilter} onOpenEdit={setEditingTx} onOpenNew={() => openTx({})} isMobile={isMobile} />}
         {tab === "contas" && (
           <ContasFixas T={T} bills={applicableBills} invoiceOptions={invoiceOptions} mKey={mKey} onAddBill={addBill} onUpdateBill={updateBill} onDeleteBill={deleteBill} onTogglePaid={toggleBillPaid} onPayInvoice={openInvoicePayment} />
         )}
@@ -777,7 +784,7 @@ function AllocationBar({ T, projFixed, projIncome, allocacoes, naoAlocado }) {
 /* ---------------------------------------------------------------------- */
 /* Dashboard                                                               */
 /* ---------------------------------------------------------------------- */
-function Dashboard({ T, monthTx, transactions, cursor, plan, variableCategories, saldoReal, isMobile }) {
+function Dashboard({ T, monthTx, transactions, cursor, plan, variableCategories, saldoReal, isMobile, onOpenCategory }) {
   const income = monthTx.filter((t) => t.type === "income").reduce((s, t) => s + t.amount, 0);
   const expense = monthTx.filter(visibleExpense).reduce((s, t) => s + t.amount, 0);
   const pieData = useMemo(() => {
@@ -845,15 +852,15 @@ function Dashboard({ T, monthTx, transactions, cursor, plan, variableCategories,
           const pct = planned > 0 ? Math.min(100, (spent / planned) * 100) : 0;
           const over = planned > 0 && spent > planned;
           return (
-            <div key={c.name} style={{ padding: "10px 0", borderBottom: `1px solid ${T.border}` }}>
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 6 }}>
-                <span style={{ display: "flex", alignItems: "center", gap: 6 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: c.color }} />{c.name}</span>
-                <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: over ? T.expense : T.textSoft }}>{fmtBRL(spent)} / {fmtBRL(planned)}</span>
+            <button key={c.name} onClick={() => onOpenCategory(c.name)} style={{ display: "block", width: "100%", padding: "10px 0", border: "none", borderBottom: `1px solid ${T.border}`, background: "transparent", color: T.text, cursor: "pointer", textAlign: "left" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 6, gap: 10 }}>
+                <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: c.color, flexShrink: 0 }} /><span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</span></span>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: over ? T.expense : T.textSoft, flexShrink: 0 }}>{fmtBRL(spent)} / {fmtBRL(planned)}</span>
               </div>
               <div style={{ height: 5, borderRadius: 3, background: T.surface2, overflow: "hidden" }}>
                 <div style={{ height: "100%", width: `${pct}%`, background: over ? T.expense : c.color }} />
               </div>
-            </div>
+            </button>
           );
         })}
       </Card>
@@ -883,16 +890,29 @@ function TxRow({ T, t, onEdit, variableCategories }) {
     </div>
   );
 }
-function Transacoes({ T, monthTx, variableCategories, onOpenEdit, onOpenNew }) {
-  const [filter, setFilter] = useState("all");
-  const filtered = monthTx.filter((t) => filter === "all" || t.type === filter);
+function Transacoes({ T, monthTx, variableCategories, typeFilter, onTypeFilterChange, categoryFilter, onCategoryFilterChange, onOpenEdit, onOpenNew }) {
+  const filter = typeFilter;
+  const setFilter = onTypeFilterChange;
+  const setCategoryFilter = onCategoryFilterChange;
+  const typeFiltered = monthTx.filter((t) => filter === "all" || t.type === filter);
+  const categoryOptions = [...new Set(typeFiltered.map((t) => t.category).filter(Boolean))].sort((a, b) => a.localeCompare(b, "pt-BR"));
+  const filtered = typeFiltered.filter((t) => categoryFilter === "all" || t.category === categoryFilter);
+
+  useEffect(() => {
+    if (categoryFilter !== "all" && !categoryOptions.includes(categoryFilter)) setCategoryFilter("all");
+  }, [categoryFilter, categoryOptions]);
+
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 10 }}>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           {[["all","Todas"],["income","Receitas"],["expense","Despesas"]].map(([v,l]) => (
-            <button key={v} onClick={() => setFilter(v)} style={{ padding: "6px 14px", borderRadius: 20, border: `1px solid ${filter===v?T.accent:T.border}`, background: filter===v?T.accentSoft:T.surface, color: filter===v?T.accent:T.textSoft, fontSize: 12.5, cursor: "pointer", fontWeight: 500 }}>{l}</button>
+            <button key={v} onClick={() => { setFilter(v); setCategoryFilter("all"); }} style={{ padding: "6px 14px", borderRadius: 20, border: `1px solid ${filter===v?T.accent:T.border}`, background: filter===v?T.accentSoft:T.surface, color: filter===v?T.accent:T.textSoft, fontSize: 12.5, cursor: "pointer", fontWeight: 500 }}>{l}</button>
           ))}
+          <select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} style={{ ...inputStyle(T), width: "auto", minWidth: 180, padding: "7px 10px", fontSize: 12.5 }}>
+            <option value="all">Todas as categorias</option>
+            {categoryOptions.map((cat) => <option key={cat} value={cat}>{cat}</option>)}
+          </select>
         </div>
         <button onClick={onOpenNew} style={btn(T)}><Plus size={14} /> Novo lançamento</button>
       </div>
