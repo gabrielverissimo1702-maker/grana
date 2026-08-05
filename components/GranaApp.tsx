@@ -29,12 +29,12 @@ function buildTokens(themeName, paletteKey) {
   const accentPair = PALETTES[paletteKey] || PALETTES.indigo;
   if (themeName === "dark") {
     return {
-      bg: "#07080A", surface: "rgba(5,6,8,0.96)", surface2: "#111318", border: "rgba(255,255,255,0.075)",
-      text: "#F4F5F7", textSoft: "#A5ABB6", textFaint: "#686F7C",
+      bg: "#000000", surface: "rgba(24,26,32,0.97)", surface2: "#22252B", border: "rgba(255,255,255,0.11)",
+      text: "#F6F7F9", textSoft: "#C2C7D0", textFaint: "#858D9A",
       accent: accentPair.dark, accentSoft: accentPair.dark + "1F",
       income: "#34D399", expense: "#F87171", warning: "#F59E0B",
-      pageOverlay: "rgba(10,11,14,0.90)", panelShadow: "0 22px 54px rgba(0,0,0,0.46)",
-      pageBase: "#08090C",
+      pageOverlay: "rgba(0,0,0,0.88)", panelShadow: "0 22px 54px rgba(0,0,0,0.50)",
+      pageBase: "#000000",
     };
   }
   return {
@@ -47,14 +47,21 @@ function buildTokens(themeName, paletteKey) {
   };
 }
 
-const VARIABLE_CATEGORIES = [
-  { name: "Alimentação", weight: 30, color: "#B8873A" },
-  { name: "Investimentos", weight: 20, color: "#2F8F6B" },
-  { name: "Lazer", weight: 15, color: "#7C6FC4" },
-  { name: "Transporte", weight: 15, color: "#4472A8" },
-  { name: "Viagem", weight: 10, color: "#A85C7A" },
-  { name: "Outros", weight: 10, color: "#767C86" },
+const DEFAULT_VARIABLE_CATEGORIES = [
+  { id: "alimentacao", name: "Alimenta\u00e7\u00e3o", weight: 30, color: "#F97316" },
+  { id: "investimentos", name: "Investimentos", weight: 20, color: "#10B981" },
+  { id: "lazer", name: "Lazer", weight: 15, color: "#8B5CF6" },
+  { id: "transporte", name: "Transporte", weight: 15, color: "#0EA5E9" },
+  { id: "viagem", name: "Viagem", weight: 10, color: "#EC4899" },
+  { id: "outros", name: "Outros", weight: 10, color: "#EAB308" },
 ];
+const EXTRA_EXPENSE_COLORS = ["#EF4444", "#14B8A6", "#6366F1", "#F59E0B", "#06B6D4", "#A855F7", "#84CC16", "#F43F5E"];
+function colorForCategory(name, categories) {
+  const direct = categories.find((c) => c.name === name)?.color;
+  if (direct) return direct;
+  const seed = Array.from(name || "").reduce((sum, ch) => sum + ch.charCodeAt(0), 0);
+  return EXTRA_EXPENSE_COLORS[seed % EXTRA_EXPENSE_COLORS.length];
+}
 
 const MONTHS = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
 const fmtBRL = (n) => (n < 0 ? "-" : "") + "R$ " + Math.abs(n || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -72,9 +79,21 @@ const DEFAULT_DATA = {
   theme: "light", palette: "indigo",
   accounts: [], cards: [], bills: [], transactions: [],
   transfers: [], investments: [], investmentMoves: [],
-  planning: {},
+  planning: {}, variableCategories: DEFAULT_VARIABLE_CATEGORIES,
 };
 const emptyMonthPlan = () => ({ incomes: [], variablePlanned: {}, weights: {} });
+const invoiceLabelFor = (card) => "Fatura " + card.name;
+const visibleExpense = (t) => t.type === "expense" && !t.cashflowOnly;
+function normalizeData(raw) {
+  const parsed = raw ? JSON.parse(raw.value) : {};
+  const variableCategories = (parsed.variableCategories?.length ? parsed.variableCategories : DEFAULT_VARIABLE_CATEGORIES)
+    .map((c, index) => {
+      const defaults = DEFAULT_VARIABLE_CATEGORIES[index % DEFAULT_VARIABLE_CATEGORIES.length];
+      return { ...defaults, ...c, id: c.id || uid(), color: defaults.color };
+    });
+  const cards = (parsed.cards || []).map((c) => ({ partials: {}, invoicePaid: {}, ...c }));
+  return { ...DEFAULT_DATA, ...parsed, cards, variableCategories };
+}
 
 // cada conta tem uma lista de meses do ano (1-12) em que ela é ativa; por padrão, o ano todo
 const ALL_MONTHS_NUM = [1,2,3,4,5,6,7,8,9,10,11,12];
@@ -164,7 +183,7 @@ export default function App() {
     (async () => {
       try {
         const res = await withTimeout(storage.get(STORAGE_KEY, false), 8000);
-        setData(res ? { ...DEFAULT_DATA, ...JSON.parse(res.value) } : DEFAULT_DATA);
+        setData(normalizeData(res));
       } catch {
         setData(DEFAULT_DATA);
       } finally {
@@ -195,13 +214,17 @@ export default function App() {
 
   const mKey = monthKey(cursor);
   const plan = data.planning[mKey] || emptyMonthPlan();
+  const variableCategories = data.variableCategories || DEFAULT_VARIABLE_CATEGORIES;
   const monthTx = data.transactions.filter((t) => t.date.slice(0, 7) === mKey);
   const realIncome = monthTx.filter((t) => t.type === "income").reduce((s, t) => s + t.amount, 0);
   const applicableBills = billsForMonth(data.bills, mKey);
-  const fixedLabels = applicableBills.map((b) => b.name);
-  const realFixedFromBills = monthTx.filter((t) => t.type === "expense" && fixedLabels.some((l) => l.toLowerCase() === t.category.toLowerCase())).reduce((s, t) => s + t.amount, 0);
+  const billLabels = applicableBills.map((b) => b.name);
+  const invoiceOptions = data.cards.map((card) => ({ cardId: card.id, label: invoiceLabelFor(card), amount: totalInvoiceOf(card, mKey, data.transactions), dueDay: card.dueDay, paid: !!card.invoicePaid?.[mKey] })).filter((invoice) => invoice.amount > 0);
+  const invoiceLabels = invoiceOptions.map((invoice) => invoice.label);
+  const fixedLabels = [...billLabels, ...invoiceLabels];
+  const realFixedFromBills = monthTx.filter((t) => visibleExpense(t) && billLabels.some((l) => l.toLowerCase() === t.category.toLowerCase())).reduce((s, t) => s + t.amount, 0);
   // a fatura inteira do cartão (compras lançadas + valor parcial) conta como saída fixa do mês
-  const cardsFixedTotal = data.cards.reduce((s, c) => s + totalInvoiceOf(c, mKey, data.transactions), 0);
+  const cardsFixedTotal = invoiceOptions.reduce((s, invoice) => s + invoice.amount, 0);
   const realFixed = realFixedFromBills + cardsFixedTotal;
   const projIncome = plan.incomes.reduce((s, i) => s + i.amount, 0);
   const projFixed = applicableBills.reduce((s, b) => s + b.amount, 0) + cardsFixedTotal;
@@ -234,9 +257,23 @@ export default function App() {
   const removeIncome = (id) => updatePlan({ incomes: plan.incomes.filter((i) => i.id !== id) });
   const setVariablePlanned = (cat, val) => updatePlan({ variablePlanned: { ...plan.variablePlanned, [cat]: val } });
   const setWeight = (cat, val) => updatePlan({ weights: { ...plan.weights, [cat]: val } });
+  const renameVariableCategory = (oldName, newName) => {
+    const clean = newName.trim();
+    if (!clean || clean.toLowerCase() === oldName.toLowerCase()) return;
+    const nextCategories = variableCategories.map((c) => c.name === oldName ? { ...c, name: clean } : c);
+    const nextPlanning = Object.fromEntries(Object.entries(data.planning).map(([key, monthPlan]) => {
+      const variablePlanned = { ...(monthPlan.variablePlanned || {}) };
+      const weights = { ...(monthPlan.weights || {}) };
+      if (Object.prototype.hasOwnProperty.call(variablePlanned, oldName)) { variablePlanned[clean] = variablePlanned[oldName]; delete variablePlanned[oldName]; }
+      if (Object.prototype.hasOwnProperty.call(weights, oldName)) { weights[clean] = weights[oldName]; delete weights[oldName]; }
+      return [key, { ...monthPlan, variablePlanned, weights }];
+    }));
+    const transactions = data.transactions.map((t) => t.category === oldName ? { ...t, category: clean } : t);
+    persist({ ...data, variableCategories: nextCategories, planning: nextPlanning, transactions });
+  };
   const recalcularComReal = () => {
     const next = {};
-    VARIABLE_CATEGORIES.forEach((c) => {
+    variableCategories.forEach((c) => {
       const w = plan.weights[c.name] ?? c.weight;
       next[c.name] = Math.max(0, Math.round((saldoReal * w) / 100));
     });
@@ -246,10 +283,14 @@ export default function App() {
   const addTransaction = (tx) => {
     const newTx = { id: uid(), ...tx };
     let bills = data.bills;
-    if (tx.type === "expense") {
+    let cards = data.cards;
+    if (tx.type === "expense" && !tx.cashflowOnly) {
       bills = data.bills.map((b) => (b.name.toLowerCase() === tx.category.toLowerCase() ? { ...b, paid: { ...b.paid, [tx.date.slice(0, 7)]: true } } : b));
     }
-    persist({ ...data, bills, transactions: [newTx, ...data.transactions] });
+    if (tx.invoicePayment?.cardId) {
+      cards = data.cards.map((c) => c.id === tx.invoicePayment.cardId ? { ...c, invoicePaid: { ...(c.invoicePaid || {}), [tx.invoicePayment.month || tx.date.slice(0, 7)]: true } } : c);
+    }
+    persist({ ...data, bills, cards, transactions: [newTx, ...data.transactions] });
   };
   const updateTransaction = (id, patch) => persist({ ...data, transactions: data.transactions.map((t) => (t.id === id ? { ...t, ...patch } : t)) });
   const deleteTransaction = (id) => persist({ ...data, transactions: data.transactions.filter((t) => t.id !== id) });
@@ -286,11 +327,16 @@ export default function App() {
   };
 
   const openTx = (preset) => setTxPreset(preset || {});
+  const openInvoicePayment = (invoice) => setTxPreset({
+    type: "expense", category: invoice.label, amount: invoice.amount,
+    description: "Pagamento " + invoice.label, cashflowOnly: true,
+    invoicePayment: { cardId: invoice.cardId, month: mKey }, requireAccountOnly: true,
+  });
 
   return (
     <div
       style={{
-        minHeight: "100vh",
+        minHeight: "100dvh",
         backgroundColor: T.pageBase,
         backgroundImage: `linear-gradient(${T.pageOverlay}, ${T.pageOverlay}), url('/images/money-bg.jpg')`,
         backgroundSize: "cover",
@@ -300,12 +346,14 @@ export default function App() {
         fontFamily: "'Manrope', sans-serif",
         display: "flex",
         flexDirection: isMobile ? "column" : "row",
-        padding: isMobile ? 0 : 20,
+        padding: isMobile ? "env(safe-area-inset-top) 0 env(safe-area-inset-bottom)" : 20,
         gap: isMobile ? 0 : 20,
       }}
     >
       <style>{`
         * { box-sizing: border-box; }
+        html, body, #__next { background: ${T.pageBase}; }
+        body { margin: 0; overscroll-behavior-y: none; }
         button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid ${T.accent}; outline-offset: 1px; }
         ::-webkit-scrollbar { width: 8px; height: 8px; }
         ::-webkit-scrollbar-thumb { background: ${T.border}; border-radius: 4px; }
@@ -320,15 +368,15 @@ export default function App() {
       <main style={{ flex: 1, minWidth: 0, padding: isMobile ? "4px 12px 104px" : "8px 12px 18px", overflowY: "auto" }}>
         <MonthNav T={T} cursor={cursor} setCursor={setCursor} isMobile={isMobile} />
 
-        {tab === "dashboard" && <Dashboard T={T} monthTx={monthTx} transactions={data.transactions} cursor={cursor} plan={plan} saldoReal={saldoReal} isMobile={isMobile} />}
+        {tab === "dashboard" && <Dashboard T={T} monthTx={monthTx} transactions={data.transactions} cursor={cursor} plan={plan} variableCategories={variableCategories} saldoReal={saldoReal} isMobile={isMobile} />}
         {tab === "planejamento" && (
-          <Planejamento T={T} plan={plan} bills={applicableBills} cards={data.cards} transactions={data.transactions} mKey={mKey} projIncome={projIncome} projFixed={projFixed} saldoPlanejado={saldoPlanejado}
+          <Planejamento T={T} plan={plan} variableCategories={variableCategories} bills={applicableBills} cards={data.cards} transactions={data.transactions} mKey={mKey} projIncome={projIncome} projFixed={projFixed} saldoPlanejado={saldoPlanejado}
             saldoReal={saldoReal} onAddIncome={addIncome} onRemoveIncome={removeIncome} onAddBill={(b) => addBill({ ...b, months: [parseInt(mKey.split("-")[1], 10)] })} onDeleteBill={deleteBill}
-            onSetVariablePlanned={setVariablePlanned} onSetWeight={setWeight} onRecalcular={recalcularComReal} isMobile={isMobile} />
+            onSetVariablePlanned={setVariablePlanned} onSetWeight={setWeight} onRenameVariableCategory={renameVariableCategory} onRecalcular={recalcularComReal} isMobile={isMobile} />
         )}
-        {tab === "transacoes" && <Transacoes T={T} monthTx={monthTx} onOpenEdit={setEditingTx} onOpenNew={() => openTx({})} isMobile={isMobile} />}
+        {tab === "transacoes" && <Transacoes T={T} monthTx={monthTx} variableCategories={variableCategories} onOpenEdit={setEditingTx} onOpenNew={() => openTx({})} isMobile={isMobile} />}
         {tab === "contas" && (
-          <ContasFixas T={T} bills={applicableBills} mKey={mKey} onAddBill={addBill} onUpdateBill={updateBill} onDeleteBill={deleteBill} onTogglePaid={toggleBillPaid} />
+          <ContasFixas T={T} bills={applicableBills} invoiceOptions={invoiceOptions} mKey={mKey} onAddBill={addBill} onUpdateBill={updateBill} onDeleteBill={deleteBill} onTogglePaid={toggleBillPaid} onPayInvoice={openInvoicePayment} />
         )}
         {tab === "bancos" && (
           <BancosCartoes T={T} accounts={data.accounts} cards={data.cards} transactions={data.transactions} transfers={data.transfers} mKey={mKey}
@@ -348,7 +396,7 @@ export default function App() {
       {(txPreset || editingTx) && (
         <TxModal T={T} preset={txPreset || {}} editingTx={editingTx} onClose={() => { setTxPreset(null); setEditingTx(null); }}
           onAdd={addTransaction} onUpdate={updateTransaction} onDelete={deleteTransaction}
-          fixedLabels={fixedLabels} accounts={data.accounts} cards={data.cards} incomeLabels={plan.incomes.map((i) => i.label)} isMobile={isMobile} />
+          fixedLabels={fixedLabels} variableCategories={variableCategories} invoiceOptions={invoiceOptions} accounts={data.accounts} cards={data.cards} incomeLabels={plan.incomes.map((i) => i.label)} isMobile={isMobile} />
       )}
 
       {toast && (
@@ -569,15 +617,15 @@ function Aparencia({ T, theme, palette, onToggleTheme, onSetPalette }) {
 /* ---------------------------------------------------------------------- */
 /* Planejamento                                                            */
 /* ---------------------------------------------------------------------- */
-function Planejamento({ T, plan, bills, cards, transactions, mKey, projIncome, projFixed, saldoPlanejado, saldoReal, onAddIncome, onRemoveIncome, onAddBill, onDeleteBill, onSetVariablePlanned, onSetWeight, onRecalcular, isMobile }) {
+function Planejamento({ T, plan, variableCategories, bills, cards, transactions, mKey, projIncome, projFixed, saldoPlanejado, saldoReal, onAddIncome, onRemoveIncome, onAddBill, onDeleteBill, onSetVariablePlanned, onSetWeight, onRenameVariableCategory, onRecalcular, isMobile }) {
   const [newIncomeLabel, setNewIncomeLabel] = useState("");
   const [newIncomeAmount, setNewIncomeAmount] = useState("");
   const [newFixedLabel, setNewFixedLabel] = useState("");
   const [newFixedAmount, setNewFixedAmount] = useState("");
   const [newFixedDay, setNewFixedDay] = useState("5");
 
-  const totalWeight = VARIABLE_CATEGORIES.reduce((s, c) => s + (plan.weights[c.name] ?? c.weight), 0) || 100;
-  const allocacoes = VARIABLE_CATEGORIES.map((c) => {
+  const totalWeight = variableCategories.reduce((s, c) => s + (plan.weights[c.name] ?? c.weight), 0) || 100;
+  const allocacoes = variableCategories.map((c) => {
     const w = plan.weights[c.name] ?? c.weight;
     const recomendado = Math.max(0, Math.round((saldoPlanejado * w) / totalWeight));
     return { ...c, w, recomendado, planejado: plan.variablePlanned[c.name] ?? recomendado };
@@ -634,7 +682,7 @@ function Planejamento({ T, plan, bills, cards, transactions, mKey, projIncome, p
           <div key={a.name} style={{ display: "flex", alignItems: "center", gap: isMobile ? 8 : 14, padding: "12px 0", borderBottom: `1px solid ${T.border}`, flexWrap: isMobile ? "wrap" : "nowrap" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, width: isMobile ? "100%" : 140 }}>
               <div style={{ width: 8, height: 8, borderRadius: "50%", background: a.color, flexShrink: 0 }} />
-              <span style={{ fontSize: 13.5, fontWeight: 500 }}>{a.name}</span>
+              <CategoryNameInput T={T} value={a.name} onCommit={(nextName) => onRenameVariableCategory(a.name, nextName)} />
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 4, width: 66 }}>
               <input type="number" value={a.w} onChange={(e) => onSetWeight(a.name, parseFloat(e.target.value) || 0)} style={{ ...inputStyle(T), padding: "5px 6px", fontSize: 12, textAlign: "center" }} />
@@ -676,6 +724,21 @@ function Planejamento({ T, plan, bills, cards, transactions, mKey, projIncome, p
     </div>
   );
 }
+function CategoryNameInput({ T, value, onCommit }) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+  const commit = () => onCommit(draft);
+  return (
+    <input
+      aria-label="Nome da categoria"
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+      style={{ ...inputStyle(T), padding: "6px 8px", fontSize: 13, fontWeight: 600 }}
+    />
+  );
+}
 function LineRow({ T, label, amount, color, onRemove }) {
   return (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${T.border}` }}>
@@ -714,12 +777,12 @@ function AllocationBar({ T, projFixed, projIncome, allocacoes, naoAlocado }) {
 /* ---------------------------------------------------------------------- */
 /* Dashboard                                                               */
 /* ---------------------------------------------------------------------- */
-function Dashboard({ T, monthTx, transactions, cursor, plan, saldoReal, isMobile }) {
+function Dashboard({ T, monthTx, transactions, cursor, plan, variableCategories, saldoReal, isMobile }) {
   const income = monthTx.filter((t) => t.type === "income").reduce((s, t) => s + t.amount, 0);
-  const expense = monthTx.filter((t) => t.type === "expense").reduce((s, t) => s + t.amount, 0);
+  const expense = monthTx.filter(visibleExpense).reduce((s, t) => s + t.amount, 0);
   const pieData = useMemo(() => {
     const byCat = {};
-    monthTx.filter((t) => t.type === "expense").forEach((t) => { byCat[t.category] = (byCat[t.category] || 0) + t.amount; });
+    monthTx.filter(visibleExpense).forEach((t) => { byCat[t.category] = (byCat[t.category] || 0) + t.amount; });
     return Object.entries(byCat).map(([name, value]) => ({ name, value }));
   }, [monthTx]);
   const barData = useMemo(() => {
@@ -728,17 +791,17 @@ function Dashboard({ T, monthTx, transactions, cursor, plan, saldoReal, isMobile
       const d = new Date(cursor.getFullYear(), cursor.getMonth() - i, 1);
       const k = monthKey(d);
       const inc = transactions.filter((t) => t.type === "income" && t.date.slice(0, 7) === k).reduce((s, t) => s + t.amount, 0);
-      const exp = transactions.filter((t) => t.type === "expense" && t.date.slice(0, 7) === k).reduce((s, t) => s + t.amount, 0);
+      const exp = transactions.filter((t) => visibleExpense(t) && t.date.slice(0, 7) === k).reduce((s, t) => s + t.amount, 0);
       out.push({ mes: MONTHS[d.getMonth()], Receitas: inc, Despesas: exp });
     }
     return out;
   }, [transactions, cursor]);
   const spentByCat = useMemo(() => {
     const out = {};
-    monthTx.filter((t) => t.type === "expense").forEach((t) => { out[t.category] = (out[t.category] || 0) + t.amount; });
+    monthTx.filter(visibleExpense).forEach((t) => { out[t.category] = (out[t.category] || 0) + t.amount; });
     return out;
   }, [monthTx]);
-  const colorFor = (name) => VARIABLE_CATEGORIES.find((c) => c.name === name)?.color || T.textFaint;
+  const colorFor = (name) => colorForCategory(name, variableCategories);
 
   return (
     <div>
@@ -776,7 +839,7 @@ function Dashboard({ T, monthTx, transactions, cursor, plan, saldoReal, isMobile
         </Card>
       </div>
       <Card T={T} title="Progresso do planejamento (gastos variáveis)">
-        {VARIABLE_CATEGORIES.map((c) => {
+        {variableCategories.map((c) => {
           const planned = plan.variablePlanned[c.name] ?? Math.round((saldoReal * c.weight) / 100);
           const spent = spentByCat[c.name] || 0;
           const pct = planned > 0 ? Math.min(100, (spent / planned) * 100) : 0;
@@ -801,9 +864,9 @@ function Dashboard({ T, monthTx, transactions, cursor, plan, saldoReal, isMobile
 /* ---------------------------------------------------------------------- */
 /* Transações                                                              */
 /* ---------------------------------------------------------------------- */
-function TxRow({ T, t, onEdit }) {
+function TxRow({ T, t, onEdit, variableCategories }) {
   const isIncome = t.type === "income";
-  const color = isIncome ? T.income : (VARIABLE_CATEGORIES.find((c) => c.name === t.category)?.color || T.expense);
+  const color = isIncome ? T.income : colorForCategory(t.category, variableCategories);
   return (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${T.border}` }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
@@ -820,7 +883,7 @@ function TxRow({ T, t, onEdit }) {
     </div>
   );
 }
-function Transacoes({ T, monthTx, onOpenEdit, onOpenNew }) {
+function Transacoes({ T, monthTx, variableCategories, onOpenEdit, onOpenNew }) {
   const [filter, setFilter] = useState("all");
   const filtered = monthTx.filter((t) => filter === "all" || t.type === filter);
   return (
@@ -834,7 +897,7 @@ function Transacoes({ T, monthTx, onOpenEdit, onOpenNew }) {
         <button onClick={onOpenNew} style={btn(T)}><Plus size={14} /> Novo lançamento</button>
       </div>
       <Card T={T} title={`Lançamentos (${filtered.length})`}>
-        {filtered.length === 0 ? <Empty T={T} text="Nada por aqui ainda." /> : filtered.map((t) => <TxRow key={t.id} T={T} t={t} onEdit={onOpenEdit} />)}
+        {filtered.length === 0 ? <Empty T={T} text="Nada por aqui ainda." /> : filtered.map((t) => <TxRow key={t.id} T={T} t={t} onEdit={onOpenEdit} variableCategories={variableCategories} />)}
       </Card>
     </div>
   );
@@ -854,19 +917,19 @@ function Modal({ T, title, children, onClose, isMobile }) {
 }
 function Field({ T, label, children }) { return <div style={{ marginBottom: 12 }}><label style={{ display: "block", fontSize: 12, color: T.textFaint, marginBottom: 5 }}>{label}</label>{children}</div>; }
 
-function TxModal({ T, preset, editingTx, onClose, onAdd, onUpdate, onDelete, fixedLabels, accounts, cards, incomeLabels, isMobile }) {
+function TxModal({ T, preset, editingTx, onClose, onAdd, onUpdate, onDelete, fixedLabels, variableCategories, invoiceOptions, accounts, cards, incomeLabels, isMobile }) {
   const isEdit = !!editingTx;
   const effectiveSource = editingTx?.source || preset.source;
   const lockType = effectiveSource?.type === "card"; // gasto lançado direto de um cartão só pode ser despesa
   const [type, setType] = useState(editingTx?.type || preset.type || "expense");
-  const [amount, setAmount] = useState(editingTx ? String(editingTx.amount) : "");
-  const [category, setCategory] = useState(editingTx?.category || "");
-  const [description, setDescription] = useState(editingTx?.description || "");
+  const [amount, setAmount] = useState(editingTx ? String(editingTx.amount) : (preset.amount ? String(preset.amount) : ""));
+  const [category, setCategory] = useState(editingTx?.category || preset.category || "");
+  const [description, setDescription] = useState(editingTx?.description || preset.description || "");
   const [date, setDate] = useState(editingTx?.date || todayISO());
   const [source, setSource] = useState(effectiveSource ? `${effectiveSource.type}:${effectiveSource.id}` : "");
   const [error, setError] = useState("");
 
-  const expenseCats = [...new Set([...fixedLabels, ...VARIABLE_CATEGORIES.map((c) => c.name), ...(editingTx?.type === "expense" ? [editingTx.category] : [])])];
+  const expenseCats = [...new Set([...fixedLabels, ...variableCategories.map((c) => c.name), ...invoiceOptions.map((i) => i.label), ...(editingTx?.type === "expense" ? [editingTx.category] : [])])];
   const incomeCats = [...new Set([...(incomeLabels.length ? incomeLabels : ["Salário", "Freelance", "Investimentos", "Outros"]), ...(editingTx?.type === "income" ? [editingTx.category] : [])])];
   const cats = type === "expense" ? expenseCats : incomeCats;
   const currentCat = category || cats[0] || "Outros";
@@ -879,13 +942,23 @@ function TxModal({ T, preset, editingTx, onClose, onAdd, onUpdate, onDelete, fix
     const val = parseNum(amount);
     if (!val || val <= 0) return;
     if (!source) {
-      setError(type === "income" ? "Selecione em qual conta o dinheiro entrou." : "Selecione a conta ou o cartão da saída.");
+      setError(type === "income" ? "Selecione em qual conta o dinheiro entrou." : (preset.requireAccountOnly ? "Selecione a conta que pagou a fatura." : "Selecione a conta ou o cartão da saída."));
+      return;
+    }
+    if (preset.requireAccountOnly && source.split(":")[0] !== "account") {
+      setError("A fatura precisa ser paga com uma conta bancária.");
       return;
     }
     let src = null;
     if (source) { const [t, id] = source.split(":"); src = { type: t, id }; }
     const invoiceMonth = src?.type === "card" ? invoiceMonthOf(date, cards.find((card) => card.id === src.id)?.closingDay || 31) : undefined;
-    const payload = { type, amount: val, category: currentCat, description: description.trim(), date, source: src, ...(invoiceMonth ? { invoiceMonth } : {}) };
+    const invoiceOption = type === "expense" ? invoiceOptions.find((invoice) => invoice.label === currentCat) : null;
+    const payload = {
+      type, amount: val, category: currentCat, description: description.trim(), date, source: src,
+      ...(invoiceMonth ? { invoiceMonth } : {}),
+      ...((preset.cashflowOnly || invoiceOption) ? { cashflowOnly: true } : {}),
+      ...((preset.invoicePayment || invoiceOption) ? { invoicePayment: preset.invoicePayment || { cardId: invoiceOption.cardId, month: date.slice(0, 7) } } : {}),
+    };
     if (isEdit) onUpdate(editingTx.id, payload); else onAdd(payload);
     onClose();
   };
@@ -925,11 +998,11 @@ function TxModal({ T, preset, editingTx, onClose, onAdd, onUpdate, onDelete, fix
         )
       ) : (
         (accounts.length > 0 || cards.length > 0) && (
-          <Field T={T} label="Pago com conta ou cartão de crédito">
+          <Field T={T} label={preset.requireAccountOnly ? "Pagar com qual conta?" : "Pago com conta ou cartão de crédito"}>
             <select value={source} onChange={(e) => { setSource(e.target.value); setError(""); }} disabled={lockType} style={inputStyle(T)}>
               <option value="">Selecione</option>
               {accounts.map((a) => <option key={a.id} value={`account:${a.id}`}>{a.name}</option>)}
-              {cards.map((c) => <option key={c.id} value={`card:${c.id}`}>{c.name} (cartão de crédito - entra na fatura)</option>)}
+              {!preset.requireAccountOnly && cards.map((c) => <option key={c.id} value={`card:${c.id}`}>{c.name} (cartão de crédito - entra na fatura)</option>)}
             </select>
           </Field>
         )
@@ -953,7 +1026,7 @@ function TxModal({ T, preset, editingTx, onClose, onAdd, onUpdate, onDelete, fix
 /* ---------------------------------------------------------------------- */
 /* Contas fixas - recorrentes ou só de um mês, com alerta de vencimento    */
 /* ---------------------------------------------------------------------- */
-function ContasFixas({ T, bills, mKey, onAddBill, onUpdateBill, onDeleteBill, onTogglePaid }) {
+function ContasFixas({ T, bills, invoiceOptions, mKey, onAddBill, onUpdateBill, onDeleteBill, onTogglePaid, onPayInvoice }) {
   const [modal, setModal] = useState(false);
   const [editingBill, setEditingBill] = useState(null);
   return (
@@ -962,7 +1035,7 @@ function ContasFixas({ T, bills, mKey, onAddBill, onUpdateBill, onDeleteBill, on
         <button onClick={() => setModal(true)} style={btn(T)}><Plus size={14} /> Nova conta</button>
       </div>
       <Card T={T} title="Contas fixas deste mês">
-        {bills.length === 0 ? <Empty T={T} text="Nenhuma conta cadastrada ainda. Elas entram automaticamente no Planejamento." /> : bills.map((b) => {
+        {bills.length === 0 && invoiceOptions.length === 0 ? <Empty T={T} text="Nenhuma conta cadastrada ainda. Elas entram automaticamente no Planejamento." /> : bills.map((b) => {
           const status = billStatus(b, mKey, T);
           const paid = !!b.paid[mKey];
           return (
@@ -995,6 +1068,29 @@ function ContasFixas({ T, bills, mKey, onAddBill, onUpdateBill, onDeleteBill, on
             </div>
           );
         })}
+        {invoiceOptions.map((invoice) => (
+          <div key={invoice.cardId} style={{ padding: "12px 0", borderBottom: `1px solid ${T.border}` }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+              <div>
+                <div style={{ fontSize: 13.5, fontWeight: 500, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                  {invoice.label}
+                  <span style={{ fontSize: 10, color: T.textFaint, fontWeight: 400, border: `1px solid ${T.border}`, borderRadius: 4, padding: "1px 6px" }}>cartão</span>
+                </div>
+                <div style={{ fontSize: 11.5, color: T.textFaint, display: "flex", alignItems: "center", gap: 5, marginTop: 2 }}>
+                  Vence dia {invoice.dueDay}
+                </div>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13.5, fontWeight: 600 }}>{fmtBRL(invoice.amount)}</span>
+                {invoice.paid ? (
+                  <span style={{ border: `1px solid ${T.income}`, color: T.income, borderRadius: 6, padding: "3px 9px", fontSize: 11, display: "flex", alignItems: "center", gap: 4 }}><Check size={11} /> Pago</span>
+                ) : (
+                  <button onClick={() => onPayInvoice(invoice)} style={{ border: `1px solid ${T.accent}`, color: T.accent, borderRadius: 6, padding: "3px 9px", fontSize: 11, background: "transparent", cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}>Pagar</button>
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
         <p style={{ fontSize: 11.5, color: T.textFaint, marginTop: 12, marginBottom: 0 }}>Dica: uma transação com o mesmo nome de uma conta daqui marca ela como paga automaticamente.</p>
       </Card>
       {modal && <BillModal T={T} mKey={mKey} onClose={() => setModal(false)} onAdd={onAddBill} />}
@@ -1058,7 +1154,6 @@ function BillModal({ T, mKey, editingBill, onClose, onAdd, onUpdate, onDelete })
           <button onClick={() => { onDelete(editingBill.id); onClose(); }} style={{ ...ghostBtn(T, T.expense) }}><Trash2 size={14} /> Excluir</button>
         )}
       </div>
-      <button onClick={submit} style={{ ...btn(T), width: "100%", justifyContent: "center", marginTop: 6 }}>Salvar conta</button>
     </Modal>
   );
 }
